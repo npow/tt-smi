@@ -138,9 +138,8 @@ These options will be discussed in more detail in the following sections.
 
 On Blackhole ASICs with firmware 19.8 or newer, use `-pl` / `--power-limit`
 to set the TDP ceiling in watts. The minimum is 50 W. The maximum is configured
-per board and firmware rejects requests above it; it is not a universal 500 W.
-The setting applies per ASIC and returns to the board default after a chip
-reset.
+per board, and firmware rejects requests above it. The setting applies per ASIC
+and returns to the board default after a chip reset.
 
 Without `-i`, the limit is applied to every detected ASIC. Use `-i` / `--device`
 to select one or more devices by UMD logical ID, PCI BDF, or

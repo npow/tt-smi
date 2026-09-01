@@ -96,7 +96,7 @@ def test_set_power_limit_rejects_false_success_when_readback_is_unchanged():
         backend.set_power_limit(SmiDeviceInput(SmiDeviceTargetKind.ALL), 151)
 
 
-def test_set_power_limit_has_no_made_up_universal_maximum():
+def test_set_power_limit_leaves_upper_bound_validation_to_firmware():
     device = Mock()
     device.arc_msg.return_value = (0, 0, 0)
     backend = make_backend({0: device})
