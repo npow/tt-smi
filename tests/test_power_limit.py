@@ -23,6 +23,7 @@ def test_set_power_limit_umd_all_devices():
         device.arc_msg.return_value = (0, 0, 0)
     backend = make_backend(devices)
     backend.is_blackhole = Mock(return_value=True)
+    backend.get_runtime_tdp_limit = Mock(return_value=100)
 
     changed = backend.set_power_limit(
         SmiDeviceInput(SmiDeviceTargetKind.ALL), 100
@@ -37,17 +38,30 @@ def test_set_power_limit_umd_all_devices():
 
 def test_set_power_limit_luwen_uses_blackhole_arc_message():
     bh = Mock()
-    bh.arc_msg.return_value = (0, 0)
+    bh.arc_msg_buf.return_value = [0, 0, 0, 0, 0, 0, 0, 0]
+    device = Mock()
+    device.as_bh.return_value = bh
+    backend = make_backend({0: device}, use_umd=False)
+    backend.is_blackhole = Mock(return_value=True)
+    backend.get_runtime_tdp_limit = Mock(return_value=75)
+
+    backend.set_power_limit(SmiDeviceInput(SmiDeviceTargetKind.ALL), 75)
+
+    bh.arc_msg_buf.assert_called_once_with(
+        [constants.TT_SMC_MSG_SET_TDP_LIMIT, 75, 0, 0, 0, 0, 0, 0]
+    )
+
+
+def test_set_power_limit_luwen_reports_firmware_rejection():
+    bh = Mock()
+    bh.arc_msg_buf.return_value = [1, 0, 0, 0, 0, 0, 0, 0]
     device = Mock()
     device.as_bh.return_value = bh
     backend = make_backend({0: device}, use_umd=False)
     backend.is_blackhole = Mock(return_value=True)
 
-    backend.set_power_limit(SmiDeviceInput(SmiDeviceTargetKind.ALL), 75)
-
-    bh.arc_msg.assert_called_once_with(
-        constants.TT_SMC_MSG_SET_TDP_LIMIT, arg0=75, arg1=0
-    )
+    with pytest.raises(RuntimeError, match="Firmware rejected"):
+        backend.set_power_limit(SmiDeviceInput(SmiDeviceTargetKind.ALL), 151)
 
 
 def test_set_power_limit_validates_all_architectures_before_writing():
@@ -68,16 +82,40 @@ def test_set_power_limit_reports_firmware_rejection():
     backend.is_blackhole = Mock(return_value=True)
 
     with pytest.raises(RuntimeError, match="Firmware rejected"):
-        backend.set_power_limit(SmiDeviceInput(SmiDeviceTargetKind.ALL), 500)
+        backend.set_power_limit(SmiDeviceInput(SmiDeviceTargetKind.ALL), 151)
 
 
-@pytest.mark.parametrize("watts", [49, 501])
-def test_set_power_limit_rejects_out_of_range_value(watts):
+def test_set_power_limit_rejects_false_success_when_readback_is_unchanged():
+    device = Mock()
+    device.arc_msg.return_value = (0, 0, 0)
+    backend = make_backend({0: device})
+    backend.is_blackhole = Mock(return_value=True)
+    backend.get_runtime_tdp_limit = Mock(return_value=150)
+
+    with pytest.raises(RuntimeError, match="did not apply.*remains 150 W"):
+        backend.set_power_limit(SmiDeviceInput(SmiDeviceTargetKind.ALL), 151)
+
+
+def test_set_power_limit_has_no_made_up_universal_maximum():
+    device = Mock()
+    device.arc_msg.return_value = (0, 0, 0)
+    backend = make_backend({0: device})
+    backend.is_blackhole = Mock(return_value=True)
+    backend.get_runtime_tdp_limit = Mock(return_value=501)
+
+    backend.set_power_limit(SmiDeviceInput(SmiDeviceTargetKind.ALL), 501)
+
+    device.arc_msg.assert_called_once_with(
+        constants.TT_SMC_MSG_SET_TDP_LIMIT, args=[501, 0]
+    )
+
+
+def test_set_power_limit_rejects_value_below_firmware_minimum():
     device = Mock()
     backend = make_backend({0: device})
 
-    with pytest.raises(ValueError, match="between 50 and 500"):
-        backend.set_power_limit(SmiDeviceInput(SmiDeviceTargetKind.ALL), watts)
+    with pytest.raises(ValueError, match="at least 50.*board-specific"):
+        backend.set_power_limit(SmiDeviceInput(SmiDeviceTargetKind.ALL), 49)
 
     device.arc_msg.assert_not_called()
 

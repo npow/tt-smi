@@ -185,21 +185,32 @@ class TTSMIBackend:
             raise ValueError(f"Device target(s) not found: {', '.join(map(str, missing))}")
         return resolved
 
+    def get_runtime_tdp_limit(self, device_idx: int) -> int:
+        """Read the currently applied Blackhole runtime TDP limit."""
+        device = self.devices[device_idx]
+        if self.use_umd:
+            reader = device.get_arc_telemetry_reader()
+            tag = TelemetryTag.TDP_LIMIT_MAX.value
+            if not reader.is_entry_available(tag):
+                raise RuntimeError(
+                    f"TDP limit telemetry is unavailable on device {device_idx}"
+                )
+            return reader.read_entry(tag)
+
+        telemetry = device.as_bh().get_telemetry()
+        return telemetry.tdp_limit_max
+
     def set_power_limit(self, device_input: SmiDeviceInput, watts: int) -> List[int]:
         """Set the runtime TDP limit on selected Blackhole ASICs.
 
         Blackhole CM firmware 19.8+ implements ``TT_SMC_MSG_SET_TDP_LIMIT``.
         The limit is per ASIC and returns to the board default after chip reset.
         """
-        if not (
-            constants.MIN_RUNTIME_TDP_LIMIT_WATTS
-            <= watts
-            <= constants.MAX_RUNTIME_TDP_LIMIT_WATTS
-        ):
+        if watts < constants.MIN_RUNTIME_TDP_LIMIT_WATTS:
             raise ValueError(
-                "Power limit must be between "
-                f"{constants.MIN_RUNTIME_TDP_LIMIT_WATTS} and "
-                f"{constants.MAX_RUNTIME_TDP_LIMIT_WATTS} watts"
+                "Power limit must be at least "
+                f"{constants.MIN_RUNTIME_TDP_LIMIT_WATTS} watts; the maximum "
+                "is board-specific and enforced by firmware"
             )
 
         device_indices = self.resolve_device_input(device_input)
@@ -223,21 +234,41 @@ class TTSMIBackend:
                     args=[watts, 0],
                 )
             else:
-                result = device.as_bh().arc_msg(
-                    constants.TT_SMC_MSG_SET_TDP_LIMIT,
-                    arg0=watts,
-                    arg1=0,
+                result = device.as_bh().arc_msg_buf(
+                    [
+                        constants.TT_SMC_MSG_SET_TDP_LIMIT,
+                        watts,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                    ]
                 )
                 if result is None:
                     raise RuntimeError(
                         f"Firmware did not acknowledge the power limit on device {device_idx}"
                     )
-                _, exit_code = result
+                exit_code = result[0]
 
             if exit_code != 0:
                 raise RuntimeError(
                     f"Firmware rejected the {watts} W power limit on device {device_idx} "
                     "(it may exceed this board's configured maximum)"
+                )
+
+            # Some host interfaces do not propagate firmware's rejection status,
+            # so the telemetry readback is the authoritative success check.
+            applied_watts = self.get_runtime_tdp_limit(device_idx)
+            if applied_watts != watts:
+                time.sleep(0.05)
+                applied_watts = self.get_runtime_tdp_limit(device_idx)
+            if applied_watts != watts:
+                raise RuntimeError(
+                    f"Firmware did not apply the {watts} W power limit on device "
+                    f"{device_idx}; the current limit remains {applied_watts} W "
+                    "(the request may exceed this board's configured maximum)"
                 )
 
         return device_indices

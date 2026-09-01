@@ -158,7 +158,7 @@ def parse_args():
         metavar="WATTS",
         help=(
             "Set the per-ASIC runtime TDP limit in watts on Blackhole firmware "
-            "19.8 or newer (range: 50-500 W)"
+            "19.8 or newer (minimum: 50 W; maximum is board-specific)"
         ),
     )
     parser.add_argument(
@@ -174,15 +174,14 @@ def parse_args():
     args = parser.parse_args()
     if args.device is not None and args.power_limit is None:
         parser.error("--device requires --power-limit")
-    if args.power_limit is not None and not (
-        constants.MIN_RUNTIME_TDP_LIMIT_WATTS
-        <= args.power_limit
-        <= constants.MAX_RUNTIME_TDP_LIMIT_WATTS
+    if (
+        args.power_limit is not None
+        and args.power_limit < constants.MIN_RUNTIME_TDP_LIMIT_WATTS
     ):
         parser.error(
-            "--power-limit must be between "
-            f"{constants.MIN_RUNTIME_TDP_LIMIT_WATTS} and "
-            f"{constants.MAX_RUNTIME_TDP_LIMIT_WATTS} watts"
+            "--power-limit must be at least "
+            f"{constants.MIN_RUNTIME_TDP_LIMIT_WATTS} watts; the maximum "
+            "is board-specific and enforced by firmware"
         )
     if args.power_limit is not None and any(
         (
