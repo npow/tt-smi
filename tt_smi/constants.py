@@ -8,6 +8,10 @@ from tt_umd import (
     TopologyDiscoveryOptions,
 )
 
+TT_SMC_MSG_SET_TDP_LIMIT = 0x22
+MIN_RUNTIME_TDP_LIMIT_WATTS = 50
+MAX_RUNTIME_TDP_LIMIT_WATTS = 500
+
 def get_default_discovery_options():
     options = TopologyDiscoveryOptions()
     options.eth_fw_mismatch_action = TopologyDiscoveryOptions.Action.IGNORE

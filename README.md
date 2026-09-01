@@ -93,10 +93,10 @@ uv run pre-commit install
 
 # Usage
 
-tt-smi can be used as a GUI (`tt-smi`) or CLI (`tt-smi -s`) to display system information and Tenstorrent device telemetry, and it can be used to reset Tenstorrent devices (`tt-smi -r`).
+tt-smi can be used as a GUI (`tt-smi`) or CLI (`tt-smi -s`) to display system information and Tenstorrent device telemetry, set runtime power limits (`tt-smi -pl`), and reset Tenstorrent devices (`tt-smi -r`).
 
 ```
-tt-smi [-h] [-l] [-v] [-s] [-ls] [-f [snapshot filename]] [-c] [-r [TARGETS ...]] [--snapshot_no_tty] [-glx_reset] [-glx_reset_auto] [-glx_list_tray_to_device] [--no_reinit]
+tt-smi [-h] [-l] [-v] [-s] [-ls] [-f [snapshot filename]] [-c] [-r [TARGETS ...]] [--snapshot_no_tty] [-glx_reset] [-glx_reset_auto] [-glx_list_tray_to_device] [--no_reinit] [-pl WATTS] [-i TARGETS ...]
 ```
 
 ## Getting Help
@@ -133,6 +133,28 @@ options:
   ```
 
 These options will be discussed in more detail in the following sections.
+
+## Runtime power limits
+
+On Blackhole ASICs with firmware 19.8 or newer, use `-pl` / `--power-limit`
+to set the TDP ceiling in watts. The allowed firmware range is 50-500 W, and
+the requested value cannot exceed the maximum configured for that board. The
+setting applies per ASIC and returns to the board default after a chip reset.
+
+Without `-i`, the limit is applied to every detected ASIC. Use `-i` / `--device`
+to select one or more devices by UMD logical ID, PCI BDF, or
+`/dev/tenstorrent/<id>`. Multiple targets may be separated by spaces or commas.
+
+```bash
+tt-smi -pl 100
+tt-smi -i 0 -pl 100
+tt-smi -i 0,2 -pl 100
+tt-smi -i 0000:0a:00.0 -pl 100
+tt-smi -i /dev/tenstorrent/3 -pl 100
+```
+
+Firmware enforces the limit by throttling AICLK; it does not disable or harvest
+Tensix cores. This controls ASIC TDP rather than total board input power.
 
 ## GUI
 To bring up the tt-smi GUI run

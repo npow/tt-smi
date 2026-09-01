@@ -151,7 +151,51 @@ def parse_args():
         action="store_true",
         help="Skip waiting for Ethernet training post reset.",
     )
+    parser.add_argument(
+        "-pl",
+        "--power-limit",
+        type=int,
+        metavar="WATTS",
+        help=(
+            "Set the per-ASIC runtime TDP limit in watts on Blackhole firmware "
+            "19.8 or newer (range: 50-500 W)"
+        ),
+    )
+    parser.add_argument(
+        "-i",
+        "--device",
+        metavar="TARGETS",
+        nargs="+",
+        help=(
+            "Devices for --power-limit: UMD logical IDs, PCI BDFs, or "
+            "/dev/tenstorrent/<id>. Accepts spaces or commas. Default: all devices."
+        ),
+    )
     args = parser.parse_args()
+    if args.device is not None and args.power_limit is None:
+        parser.error("--device requires --power-limit")
+    if args.power_limit is not None and not (
+        constants.MIN_RUNTIME_TDP_LIMIT_WATTS
+        <= args.power_limit
+        <= constants.MAX_RUNTIME_TDP_LIMIT_WATTS
+    ):
+        parser.error(
+            "--power-limit must be between "
+            f"{constants.MIN_RUNTIME_TDP_LIMIT_WATTS} and "
+            f"{constants.MAX_RUNTIME_TDP_LIMIT_WATTS} watts"
+        )
+    if args.power_limit is not None and any(
+        (
+            args.reset is not None,
+            args.glx_reset,
+            args.glx_reset_auto,
+            args.glx_list_tray_to_device,
+            args.snapshot,
+            args.filename is not False,
+            args.list,
+        )
+    ):
+        parser.error("--power-limit cannot be combined with another command")
     return args
 
 
@@ -164,6 +208,20 @@ def tt_smi_main(backend: TTSMIBackend, args):
     Returns:
         None: None
     """
+    if args.power_limit is not None:
+        device_input = parse_smi_device_input(args.device)
+        try:
+            changed_devices = backend.set_power_limit(device_input, args.power_limit)
+        except Exception as error:
+            print(CMD_LINE_COLOR.RED, f"Error setting power limit: {error}", CMD_LINE_COLOR.ENDC)
+            sys.exit(1)
+        print(
+            CMD_LINE_COLOR.GREEN,
+            f"Set power limit to {args.power_limit} W on device(s): "
+            f"{', '.join(map(str, changed_devices))}",
+            CMD_LINE_COLOR.ENDC,
+        )
+        sys.exit(0)
     if args.list:
         if backend.use_umd:
             backend.print_all_available_devices_umd()
@@ -308,7 +366,12 @@ def main():
             CMD_LINE_COLOR.ENDC,
         )
         sys.exit(1)
-    backend = TTSMIBackend(devices=devices, umd_cluster_descriptor=cluster_descriptor, pretty_output=is_tty)
+    backend = TTSMIBackend(
+        devices=devices,
+        umd_cluster_descriptor=cluster_descriptor,
+        fully_init=args.power_limit is None,
+        pretty_output=is_tty,
+    )
 
     tt_smi_main(backend, args)
 

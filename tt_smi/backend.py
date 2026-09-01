@@ -17,6 +17,7 @@ from tt_smi import log
 from pathlib import Path
 from rich.table import Table
 from tt_smi import constants
+from tt_smi.device_input import SmiDeviceInput, SmiDeviceTargetKind
 from rich import get_console
 from rich.syntax import Syntax
 from typing import Any, Dict, List, Optional, Union
@@ -143,6 +144,103 @@ class TTSMIBackend:
             return "Blackhole"
         else:
             assert False, "Unknown chip name, FIX!"
+
+    def resolve_device_input(self, device_input: SmiDeviceInput) -> List[int]:
+        """Resolve a CLI device selection to keys in ``self.devices``."""
+        if device_input.type == SmiDeviceTargetKind.ALL:
+            return list(self.devices.keys())
+
+        if device_input.type == SmiDeviceTargetKind.UMD_LOGICAL_ID:
+            if not self.use_umd:
+                raise ValueError(
+                    "Bare device IDs are only supported by the UMD backend. "
+                    "Use a PCI BDF or /dev/tenstorrent/<id> with --use_luwen."
+                )
+            resolved = list(device_input.value)
+        elif device_input.type == SmiDeviceTargetKind.PCI_BDF:
+            devices_by_bdf = {
+                self.get_pci_bdf(device_idx).lower(): device_idx
+                for device_idx in self.devices
+                if self.get_pci_bdf(device_idx) != "N/A"
+            }
+            resolved = [
+                devices_by_bdf.get(bdf.lower()) for bdf in device_input.value
+            ]
+        elif device_input.type == SmiDeviceTargetKind.DEV_TENSTORRENT_ID:
+            devices_by_dev_id = {
+                int(pci_dev_id): device_idx
+                for device_idx in self.devices
+                if (pci_dev_id := self.get_pci_device_id(device_idx)) != "N/A"
+            }
+            resolved = [devices_by_dev_id.get(dev_id) for dev_id in device_input.value]
+        else:
+            raise ValueError(f"Unsupported device target type: {device_input.type}")
+
+        missing = [
+            target
+            for target, device_idx in zip(device_input.value, resolved)
+            if device_idx is None or device_idx not in self.devices
+        ]
+        if missing:
+            raise ValueError(f"Device target(s) not found: {', '.join(map(str, missing))}")
+        return resolved
+
+    def set_power_limit(self, device_input: SmiDeviceInput, watts: int) -> List[int]:
+        """Set the runtime TDP limit on selected Blackhole ASICs.
+
+        Blackhole CM firmware 19.8+ implements ``TT_SMC_MSG_SET_TDP_LIMIT``.
+        The limit is per ASIC and returns to the board default after chip reset.
+        """
+        if not (
+            constants.MIN_RUNTIME_TDP_LIMIT_WATTS
+            <= watts
+            <= constants.MAX_RUNTIME_TDP_LIMIT_WATTS
+        ):
+            raise ValueError(
+                "Power limit must be between "
+                f"{constants.MIN_RUNTIME_TDP_LIMIT_WATTS} and "
+                f"{constants.MAX_RUNTIME_TDP_LIMIT_WATTS} watts"
+            )
+
+        device_indices = self.resolve_device_input(device_input)
+        unsupported = [
+            device_idx
+            for device_idx in device_indices
+            if not self.is_blackhole(device_idx)
+        ]
+        if unsupported:
+            raise ValueError(
+                "Runtime power limits require Blackhole firmware 19.8 or newer; "
+                f"unsupported device(s): {', '.join(map(str, unsupported))}"
+            )
+
+        # Validate every target before issuing the first state-changing command.
+        for device_idx in device_indices:
+            device = self.devices[device_idx]
+            if self.use_umd:
+                exit_code, _, _ = device.arc_msg(
+                    constants.TT_SMC_MSG_SET_TDP_LIMIT,
+                    args=[watts, 0],
+                )
+            else:
+                result = device.as_bh().arc_msg(
+                    constants.TT_SMC_MSG_SET_TDP_LIMIT,
+                    arg0=watts,
+                    arg1=0,
+                )
+                if result is None:
+                    raise RuntimeError(
+                        f"Firmware did not acknowledge the power limit on device {device_idx}"
+                    )
+                _, exit_code = result
+
+            if exit_code != 0:
+                raise RuntimeError(
+                    f"Firmware rejected the {watts} W power limit on device {device_idx} "
+                    "(it may exceed this board's configured maximum)"
+                )
+
+        return device_indices
 
     def save_logs_to_file(self, result_filename: str = ""):
         """Save log for smi snapshots"""
