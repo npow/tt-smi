@@ -8,8 +8,8 @@ from tt_umd import (
     TopologyDiscoveryOptions,
 )
 
-TT_SMC_MSG_SET_TDP_LIMIT = 0x22
-MIN_RUNTIME_TDP_LIMIT_WATTS = 50
+TT_SMC_MSG_SET_BOARD_POWER_LIMIT = 0x24
+MIN_RUNTIME_BOARD_POWER_LIMIT_WATTS = 50
 
 def get_default_discovery_options():
     options = TopologyDiscoveryOptions()

@@ -23,7 +23,7 @@ def test_set_power_limit_umd_all_devices():
         device.arc_msg.return_value = (0, 0, 0)
     backend = make_backend(devices)
     backend.is_blackhole = Mock(return_value=True)
-    backend.get_runtime_tdp_limit = Mock(return_value=100)
+    backend.get_runtime_board_power_limit = Mock(return_value=100)
 
     changed = backend.set_power_limit(
         SmiDeviceInput(SmiDeviceTargetKind.ALL), 100
@@ -32,7 +32,7 @@ def test_set_power_limit_umd_all_devices():
     assert changed == [0, 1]
     for device in devices.values():
         device.arc_msg.assert_called_once_with(
-            constants.TT_SMC_MSG_SET_TDP_LIMIT, args=[100, 0]
+            constants.TT_SMC_MSG_SET_BOARD_POWER_LIMIT, args=[100, 0]
         )
 
 
@@ -43,12 +43,12 @@ def test_set_power_limit_luwen_uses_blackhole_arc_message():
     device.as_bh.return_value = bh
     backend = make_backend({0: device}, use_umd=False)
     backend.is_blackhole = Mock(return_value=True)
-    backend.get_runtime_tdp_limit = Mock(return_value=75)
+    backend.get_runtime_board_power_limit = Mock(return_value=75)
 
     backend.set_power_limit(SmiDeviceInput(SmiDeviceTargetKind.ALL), 75)
 
     bh.arc_msg_buf.assert_called_once_with(
-        [constants.TT_SMC_MSG_SET_TDP_LIMIT, 75, 0, 0, 0, 0, 0, 0]
+        [constants.TT_SMC_MSG_SET_BOARD_POWER_LIMIT, 75, 0, 0, 0, 0, 0, 0]
     )
 
 
@@ -90,7 +90,7 @@ def test_set_power_limit_rejects_false_success_when_readback_is_unchanged():
     device.arc_msg.return_value = (0, 0, 0)
     backend = make_backend({0: device})
     backend.is_blackhole = Mock(return_value=True)
-    backend.get_runtime_tdp_limit = Mock(return_value=150)
+    backend.get_runtime_board_power_limit = Mock(return_value=150)
 
     with pytest.raises(RuntimeError, match="did not apply.*remains 150 W"):
         backend.set_power_limit(SmiDeviceInput(SmiDeviceTargetKind.ALL), 151)
@@ -101,12 +101,12 @@ def test_set_power_limit_leaves_upper_bound_validation_to_firmware():
     device.arc_msg.return_value = (0, 0, 0)
     backend = make_backend({0: device})
     backend.is_blackhole = Mock(return_value=True)
-    backend.get_runtime_tdp_limit = Mock(return_value=501)
+    backend.get_runtime_board_power_limit = Mock(return_value=501)
 
     backend.set_power_limit(SmiDeviceInput(SmiDeviceTargetKind.ALL), 501)
 
     device.arc_msg.assert_called_once_with(
-        constants.TT_SMC_MSG_SET_TDP_LIMIT, args=[501, 0]
+        constants.TT_SMC_MSG_SET_BOARD_POWER_LIMIT, args=[501, 0]
     )
 
 

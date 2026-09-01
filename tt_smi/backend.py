@@ -185,31 +185,32 @@ class TTSMIBackend:
             raise ValueError(f"Device target(s) not found: {', '.join(map(str, missing))}")
         return resolved
 
-    def get_runtime_tdp_limit(self, device_idx: int) -> int:
-        """Read the currently applied Blackhole runtime TDP limit."""
+    def get_runtime_board_power_limit(self, device_idx: int) -> int:
+        """Read the currently applied Blackhole total-board power limit."""
         device = self.devices[device_idx]
         if self.use_umd:
             reader = device.get_arc_telemetry_reader()
-            tag = TelemetryTag.TDP_LIMIT_MAX.value
+            tag = TelemetryTag.BOARD_POWER_LIMIT.value
             if not reader.is_entry_available(tag):
                 raise RuntimeError(
-                    f"TDP limit telemetry is unavailable on device {device_idx}"
+                    f"Board power limit telemetry is unavailable on device {device_idx}"
                 )
             return reader.read_entry(tag)
 
         telemetry = device.as_bh().get_telemetry()
-        return telemetry.tdp_limit_max
+        return telemetry.board_power_limit
 
     def set_power_limit(self, device_input: SmiDeviceInput, watts: int) -> List[int]:
-        """Set the runtime TDP limit on selected Blackhole ASICs.
+        """Set the runtime total-board input power limit on selected devices.
 
-        Blackhole CM firmware 19.8+ implements ``TT_SMC_MSG_SET_TDP_LIMIT``.
-        The limit is per ASIC and returns to the board default after chip reset.
+        Blackhole CM firmware implementing ``TT_SMC_MSG_SET_BOARD_POWER_LIMIT``
+        applies the limit to measured board input power. The setting returns to
+        the cable- and board-specific default after chip reset.
         """
-        if watts < constants.MIN_RUNTIME_TDP_LIMIT_WATTS:
+        if watts < constants.MIN_RUNTIME_BOARD_POWER_LIMIT_WATTS:
             raise ValueError(
                 "Power limit must be at least "
-                f"{constants.MIN_RUNTIME_TDP_LIMIT_WATTS} watts; the maximum "
+                f"{constants.MIN_RUNTIME_BOARD_POWER_LIMIT_WATTS} watts; the maximum "
                 "is board-specific and enforced by firmware"
             )
 
@@ -221,7 +222,7 @@ class TTSMIBackend:
         ]
         if unsupported:
             raise ValueError(
-                "Runtime power limits require Blackhole firmware 19.8 or newer; "
+                "Runtime board power limits require supported Blackhole firmware; "
                 f"unsupported device(s): {', '.join(map(str, unsupported))}"
             )
 
@@ -230,13 +231,13 @@ class TTSMIBackend:
             device = self.devices[device_idx]
             if self.use_umd:
                 exit_code, _, _ = device.arc_msg(
-                    constants.TT_SMC_MSG_SET_TDP_LIMIT,
+                    constants.TT_SMC_MSG_SET_BOARD_POWER_LIMIT,
                     args=[watts, 0],
                 )
             else:
                 result = device.as_bh().arc_msg_buf(
                     [
-                        constants.TT_SMC_MSG_SET_TDP_LIMIT,
+                        constants.TT_SMC_MSG_SET_BOARD_POWER_LIMIT,
                         watts,
                         0,
                         0,
@@ -260,10 +261,10 @@ class TTSMIBackend:
 
             # Some host interfaces do not propagate firmware's rejection status,
             # so the telemetry readback is the authoritative success check.
-            applied_watts = self.get_runtime_tdp_limit(device_idx)
+            applied_watts = self.get_runtime_board_power_limit(device_idx)
             if applied_watts != watts:
                 time.sleep(0.05)
-                applied_watts = self.get_runtime_tdp_limit(device_idx)
+                applied_watts = self.get_runtime_board_power_limit(device_idx)
             if applied_watts != watts:
                 raise RuntimeError(
                     f"Firmware did not apply the {watts} W power limit on device "

@@ -136,10 +136,11 @@ These options will be discussed in more detail in the following sections.
 
 ## Runtime power limits
 
-On Blackhole ASICs with firmware 19.8 or newer, use `-pl` / `--power-limit`
-to set the TDP ceiling in watts. The minimum is 50 W. The maximum is configured
-per board, and firmware rejects requests above it. The setting applies per ASIC
-and returns to the board default after a chip reset.
+On Blackhole devices with firmware that supports runtime board-power limits, use
+`-pl` / `--power-limit` to set the total board input power target in watts. The
+minimum is 50 W. The maximum is configured per board and power-cable capability,
+and firmware rejects requests above it. The setting returns to that default after
+a chip reset.
 
 Without `-i`, the limit is applied to every detected ASIC. Use `-i` / `--device`
 to select one or more devices by UMD logical ID, PCI BDF, or
@@ -153,8 +154,10 @@ tt-smi -i 0000:0a:00.0 -pl 100
 tt-smi -i /dev/tenstorrent/3 -pl 100
 ```
 
-Firmware enforces the limit by throttling AICLK; it does not disable or harvest
-Tensix cores. This controls ASIC TDP rather than total board input power.
+Firmware responds to measured board input power by lowering AICLK and, at the
+clock floor, pausing Tensix issue when necessary. It does not disable or harvest
+cores. The controller regulates sustained power, so brief samples can exceed the
+configured target; leave headroom below the host power-supply threshold.
 
 ## GUI
 To bring up the tt-smi GUI run
