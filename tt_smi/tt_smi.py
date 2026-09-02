@@ -257,7 +257,7 @@ def tt_smi_main(backend: TTSMIBackend, args):
         settings = []
         if args.aiclk_limit is not None:
             settings.append(
-                "restored the AICLK limit"
+                "AICLK limit restored"
                 if args.aiclk_limit == 0
                 else f"AICLK limit {args.aiclk_limit} MHz"
             )
@@ -265,7 +265,7 @@ def tt_smi_main(backend: TTSMIBackend, args):
             settings.append(f"board power limit {args.power_limit} W")
         print(
             CMD_LINE_COLOR.GREEN,
-            f"Set {', '.join(settings)} on device(s): "
+            f"Applied {', '.join(settings)} on device(s): "
             f"{', '.join(map(str, changed_devices))}",
             CMD_LINE_COLOR.ENDC,
         )
