@@ -8,8 +8,11 @@ from tt_umd import (
     TopologyDiscoveryOptions,
 )
 
+TT_SMC_MSG_SET_ASIC_HOST_FMAX = 0x23
 TT_SMC_MSG_SET_BOARD_POWER_LIMIT = 0x24
 MIN_RUNTIME_BOARD_POWER_LIMIT_WATTS = 50
+TAG_HOST_AICLK_LIMIT = 70
+TAG_RUNTIME_POWER_FAULT = 80
 
 def get_default_discovery_options():
     options = TopologyDiscoveryOptions()

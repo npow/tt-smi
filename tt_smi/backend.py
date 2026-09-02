@@ -200,6 +200,93 @@ class TTSMIBackend:
         telemetry = device.as_bh().get_telemetry()
         return telemetry.board_power_limit
 
+    def get_runtime_aiclk_limit(self, device_idx: int) -> int:
+        """Read the host-requested Blackhole AICLK ceiling in MHz."""
+        device = self.devices[device_idx]
+        if self.use_umd:
+            reader = device.get_arc_telemetry_reader()
+            tag = constants.TAG_HOST_AICLK_LIMIT
+            if not reader.is_entry_available(tag):
+                raise RuntimeError(
+                    f"Host AICLK limit telemetry is unavailable on device {device_idx}"
+                )
+            return reader.read_entry(tag)
+
+        telemetry = device.as_bh().get_telemetry()
+        value = getattr(telemetry, "host_aiclk_limit", None)
+        if value is None:
+            raise RuntimeError(
+                f"Host AICLK limit telemetry is unavailable on device {device_idx}"
+            )
+        return value
+
+    def set_aiclk_limit(self, device_input: SmiDeviceInput, mhz: int) -> List[int]:
+        """Set or restore the proactive Blackhole AICLK ceiling.
+
+        A value of zero restores the firmware default. Non-zero bounds are
+        board-specific and validated by firmware.
+        """
+        if mhz < 0:
+            raise ValueError(
+                "AICLK limit must be zero (restore) or a positive MHz value"
+            )
+
+        device_indices = self.resolve_device_input(device_input)
+        unsupported = [
+            device_idx
+            for device_idx in device_indices
+            if not self.is_blackhole(device_idx)
+        ]
+        if unsupported:
+            raise ValueError(
+                "Runtime AICLK limits require supported Blackhole firmware; "
+                f"unsupported device(s): {', '.join(map(str, unsupported))}"
+            )
+
+        restore_default = int(mhz == 0)
+        for device_idx in device_indices:
+            device = self.devices[device_idx]
+            if self.use_umd:
+                exit_code, _, _ = device.arc_msg(
+                    constants.TT_SMC_MSG_SET_ASIC_HOST_FMAX,
+                    args=[mhz, restore_default],
+                )
+            else:
+                result = device.as_bh().arc_msg_buf(
+                    [
+                        constants.TT_SMC_MSG_SET_ASIC_HOST_FMAX,
+                        mhz,
+                        restore_default,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                    ]
+                )
+                if result is None:
+                    raise RuntimeError(
+                        f"Firmware did not acknowledge the AICLK limit on device {device_idx}"
+                    )
+                exit_code = result[0]
+
+            if exit_code != 0:
+                raise RuntimeError(
+                    f"Firmware rejected the {mhz} MHz AICLK limit on device {device_idx}"
+                )
+
+            applied_mhz = self.get_runtime_aiclk_limit(device_idx)
+            if applied_mhz != mhz:
+                time.sleep(0.05)
+                applied_mhz = self.get_runtime_aiclk_limit(device_idx)
+            if applied_mhz != mhz:
+                raise RuntimeError(
+                    f"Firmware did not apply the {mhz} MHz AICLK limit on device "
+                    f"{device_idx}; the current limit remains {applied_mhz} MHz"
+                )
+
+        return device_indices
+
     def set_power_limit(self, device_input: SmiDeviceInput, watts: int) -> List[int]:
         """Set the runtime total-board input power limit on selected devices.
 
