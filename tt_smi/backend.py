@@ -17,6 +17,7 @@ from tt_smi import log
 from pathlib import Path
 from rich.table import Table
 from tt_smi import constants
+from tt_smi.device_input import SmiDeviceInput, SmiDeviceTargetKind
 from rich import get_console
 from rich.syntax import Syntax
 from typing import Any, Dict, List, Optional, Union
@@ -143,6 +144,235 @@ class TTSMIBackend:
             return "Blackhole"
         else:
             assert False, "Unknown chip name, FIX!"
+
+    def resolve_device_input(self, device_input: SmiDeviceInput) -> List[int]:
+        """Resolve a CLI device selection to keys in ``self.devices``."""
+        if device_input.type == SmiDeviceTargetKind.ALL:
+            return list(self.devices.keys())
+
+        if device_input.type == SmiDeviceTargetKind.UMD_LOGICAL_ID:
+            if not self.use_umd:
+                raise ValueError(
+                    "Bare device IDs are only supported by the UMD backend. "
+                    "Use a PCI BDF or /dev/tenstorrent/<id> with --use_luwen."
+                )
+            resolved = list(device_input.value)
+        elif device_input.type == SmiDeviceTargetKind.PCI_BDF:
+            devices_by_bdf = {
+                self.get_pci_bdf(device_idx).lower(): device_idx
+                for device_idx in self.devices
+                if self.get_pci_bdf(device_idx) != "N/A"
+            }
+            resolved = [devices_by_bdf.get(bdf.lower()) for bdf in device_input.value]
+        elif device_input.type == SmiDeviceTargetKind.DEV_TENSTORRENT_ID:
+            devices_by_dev_id = {
+                int(pci_dev_id): device_idx
+                for device_idx in self.devices
+                if (pci_dev_id := self.get_pci_device_id(device_idx)) != "N/A"
+            }
+            resolved = [devices_by_dev_id.get(dev_id) for dev_id in device_input.value]
+        else:
+            raise ValueError(f"Unsupported device target type: {device_input.type}")
+
+        missing = [
+            target
+            for target, device_idx in zip(device_input.value, resolved)
+            if device_idx is None or device_idx not in self.devices
+        ]
+        if missing:
+            raise ValueError(
+                f"Device target(s) not found: {', '.join(map(str, missing))}"
+            )
+        return resolved
+
+    def get_runtime_board_power_limit(self, device_idx: int) -> int:
+        """Read the currently applied Blackhole total-board power limit."""
+        device = self.devices[device_idx]
+        if self.use_umd:
+            reader = device.get_arc_telemetry_reader()
+            tag = TelemetryTag.BOARD_POWER_LIMIT.value
+            if not reader.is_entry_available(tag):
+                raise RuntimeError(
+                    f"Board power limit telemetry is unavailable on device {device_idx}"
+                )
+            return reader.read_entry(tag)
+
+        telemetry = device.as_bh().get_telemetry()
+        return telemetry.board_power_limit
+
+    def get_runtime_aiclk_limit(self, device_idx: int) -> int:
+        """Read the host-requested Blackhole AICLK ceiling in MHz."""
+        device = self.devices[device_idx]
+        if self.use_umd:
+            reader = device.get_arc_telemetry_reader()
+            tag = constants.TAG_HOST_AICLK_LIMIT
+            if not reader.is_entry_available(tag):
+                raise RuntimeError(
+                    f"Host AICLK limit telemetry is unavailable on device {device_idx}"
+                )
+            return reader.read_entry(tag)
+
+        telemetry = device.as_bh().get_telemetry()
+        value = getattr(telemetry, "host_aiclk_limit", None)
+        if value is None:
+            raise RuntimeError(
+                f"Host AICLK limit telemetry is unavailable on device {device_idx}"
+            )
+        return value
+
+    def set_aiclk_limit(self, device_input: SmiDeviceInput, mhz: int) -> List[int]:
+        """Set or restore the proactive Blackhole AICLK ceiling.
+
+        A value of zero restores the firmware default. Non-zero bounds are
+        board-specific and validated by firmware.
+        """
+        if mhz < 0:
+            raise ValueError(
+                "AICLK limit must be zero (restore) or a positive MHz value"
+            )
+
+        device_indices = self.resolve_device_input(device_input)
+        unsupported = [
+            device_idx
+            for device_idx in device_indices
+            if not self.is_blackhole(device_idx)
+        ]
+        if unsupported:
+            raise ValueError(
+                "Runtime AICLK limits require supported Blackhole firmware; "
+                f"unsupported device(s): {', '.join(map(str, unsupported))}"
+            )
+
+        restore_default = int(mhz == 0)
+        for device_idx in device_indices:
+            device = self.devices[device_idx]
+            if self.use_umd:
+                exit_code, _, _ = device.arc_msg(
+                    constants.TT_SMC_MSG_SET_ASIC_HOST_FMAX,
+                    args=[mhz, restore_default],
+                )
+            else:
+                result = device.as_bh().arc_msg_buf(
+                    [
+                        constants.TT_SMC_MSG_SET_ASIC_HOST_FMAX,
+                        mhz,
+                        restore_default,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                    ]
+                )
+                if result is None:
+                    raise RuntimeError(
+                        f"Firmware did not acknowledge the AICLK limit on device {device_idx}"
+                    )
+                exit_code = result[0]
+
+            if exit_code != 0:
+                raise RuntimeError(
+                    f"Firmware rejected the {mhz} MHz AICLK limit on device {device_idx}"
+                )
+
+            try:
+                applied_mhz = self.get_runtime_aiclk_limit(device_idx)
+            except RuntimeError as error:
+                # Older Luwen releases do not expose HOST_AICLK_LIMIT even
+                # when firmware supports and acknowledges the command. In
+                # that case the ARC response is the strongest confirmation
+                # available; retain readback verification when the tag exists.
+                if "telemetry is unavailable" not in str(error):
+                    raise
+                continue
+            if applied_mhz != mhz:
+                time.sleep(0.05)
+                applied_mhz = self.get_runtime_aiclk_limit(device_idx)
+            if applied_mhz != mhz:
+                raise RuntimeError(
+                    f"Firmware did not apply the {mhz} MHz AICLK limit on device "
+                    f"{device_idx}; the current limit remains {applied_mhz} MHz"
+                )
+
+        return device_indices
+
+    def set_power_limit(self, device_input: SmiDeviceInput, watts: int) -> List[int]:
+        """Set the runtime total-board input power limit on selected devices.
+
+        Blackhole CM firmware implementing ``TT_SMC_MSG_SET_BOARD_POWER_LIMIT``
+        applies the limit to measured board input power. The setting returns to
+        the cable- and board-specific default after chip reset.
+        """
+        if watts < 0 or (
+            watts != 0 and watts < constants.MIN_RUNTIME_BOARD_POWER_LIMIT_WATTS
+        ):
+            raise ValueError(
+                "Power limit must be zero (restore) or at least "
+                f"{constants.MIN_RUNTIME_BOARD_POWER_LIMIT_WATTS} watts; the maximum "
+                "is board-specific and enforced by firmware"
+            )
+
+        device_indices = self.resolve_device_input(device_input)
+        unsupported = [
+            device_idx
+            for device_idx in device_indices
+            if not self.is_blackhole(device_idx)
+        ]
+        if unsupported:
+            raise ValueError(
+                "Runtime board power limits require supported Blackhole firmware; "
+                f"unsupported device(s): {', '.join(map(str, unsupported))}"
+            )
+
+        restore_default = int(watts == 0)
+        for device_idx in device_indices:
+            device = self.devices[device_idx]
+            if self.use_umd:
+                exit_code, _, _ = device.arc_msg(
+                    constants.TT_SMC_MSG_SET_BOARD_POWER_LIMIT,
+                    args=[watts, restore_default],
+                )
+            else:
+                result = device.as_bh().arc_msg_buf(
+                    [
+                        constants.TT_SMC_MSG_SET_BOARD_POWER_LIMIT,
+                        watts,
+                        restore_default,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                    ]
+                )
+                if result is None:
+                    raise RuntimeError(
+                        f"Firmware did not acknowledge the power limit on device {device_idx}"
+                    )
+                exit_code = result[0]
+
+            if exit_code != 0:
+                raise RuntimeError(
+                    f"Firmware rejected the {watts} W power limit on device {device_idx} "
+                    "(it may exceed this board's configured maximum)"
+                )
+
+            # Some host interfaces do not propagate firmware's rejection status,
+            # so the telemetry readback is the authoritative success check.
+            applied_watts = self.get_runtime_board_power_limit(device_idx)
+            if restore_default:
+                continue
+            if applied_watts != watts:
+                time.sleep(0.05)
+                applied_watts = self.get_runtime_board_power_limit(device_idx)
+            if applied_watts != watts:
+                raise RuntimeError(
+                    f"Firmware did not apply the {watts} W power limit on device "
+                    f"{device_idx}; the current limit remains {applied_watts} W "
+                    "(the request may exceed this board's configured maximum)"
+                )
+
+        return device_indices
 
     def save_logs_to_file(self, result_filename: str = ""):
         """Save log for smi snapshots"""

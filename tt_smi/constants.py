@@ -8,6 +8,14 @@ from tt_umd import (
     TopologyDiscoveryOptions,
 )
 
+TT_SMC_MSG_SET_ASIC_HOST_FMAX = 0x23
+TT_SMC_MSG_SET_BOARD_POWER_LIMIT = 0x24
+MIN_RUNTIME_BOARD_POWER_LIMIT_WATTS = 50
+
+# FW TAG_HOST_AICLK_LIMIT; missing from UMD TelemetryTag as of tt-umd 0.9.8
+TAG_HOST_AICLK_LIMIT = 70
+
+
 def get_default_discovery_options():
     options = TopologyDiscoveryOptions()
     options.eth_fw_mismatch_action = TopologyDiscoveryOptions.Action.IGNORE

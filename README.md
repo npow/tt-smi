@@ -93,10 +93,10 @@ uv run pre-commit install
 
 # Usage
 
-tt-smi can be used as a GUI (`tt-smi`) or CLI (`tt-smi -s`) to display system information and Tenstorrent device telemetry, and it can be used to reset Tenstorrent devices (`tt-smi -r`).
+tt-smi can be used as a GUI (`tt-smi`) or CLI (`tt-smi -s`) to display system information and Tenstorrent device telemetry, set runtime power limits (`tt-smi -pl`), and reset Tenstorrent devices (`tt-smi -r`).
 
 ```
-tt-smi [-h] [-l] [-v] [-s] [-ls] [-f [snapshot filename]] [-c] [-r [TARGETS ...]] [--snapshot_no_tty] [-glx_reset] [-glx_reset_auto] [-glx_list_tray_to_device] [--no_reinit]
+tt-smi [-h] [-l] [-v] [-s] [-ls] [-f [snapshot filename]] [-c] [-r [TARGETS ...]] [--snapshot_no_tty] [-glx_reset] [-glx_reset_auto] [-glx_list_tray_to_device] [--no_reinit] [-pl WATTS] [-al MHZ] [-i TARGETS ...]
 ```
 
 ## Getting Help
@@ -133,6 +133,41 @@ options:
   ```
 
 These options will be discussed in more detail in the following sections.
+
+## Runtime power limits
+
+On Blackhole devices with firmware that supports runtime board-power limits, use
+`-pl` / `--power-limit` to set the total board input power target in watts. The
+minimum is 50 W. The maximum is configured per board and power-cable capability,
+and firmware rejects requests above it. Pass `0` to restore that default; a chip
+reset also restores it.
+
+Without `-i`, the limit is applied to every detected ASIC. Use `-i` / `--device`
+to select one or more devices by UMD logical ID, PCI BDF, or
+`/dev/tenstorrent/<id>`. Multiple targets may be separated by spaces or commas.
+
+```bash
+tt-smi -pl 100
+tt-smi -i 0 -pl 100
+tt-smi -i 0,2 -pl 100
+tt-smi -i 0000:0a:00.0 -pl 100
+tt-smi -i /dev/tenstorrent/3 -pl 100
+tt-smi -pl 0
+```
+
+Firmware responds to measured board input power by lowering AICLK and, at the
+clock floor, pausing Tensix issue when necessary. It does not disable or harvest
+cores. The controller regulates sustained power, so brief samples can exceed the
+configured target; leave headroom below the host power-supply threshold.
+
+Use `-al` / `--aiclk-limit` for a proactive AICLK ceiling when the system also
+needs startup headroom. It is applied before `--power-limit` when both are given.
+Pass `0` to restore the firmware default. For example, this policy was validated
+on a 300 W P150A without a high-clock startup spike:
+
+```bash
+tt-smi --use_luwen -i /dev/tenstorrent/0 -al 850 -pl 300
+```
 
 ## GUI
 To bring up the tt-smi GUI run

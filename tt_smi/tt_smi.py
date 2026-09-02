@@ -151,7 +151,79 @@ def parse_args():
         action="store_true",
         help="Skip waiting for Ethernet training post reset.",
     )
+    parser.add_argument(
+        "-pl",
+        "--power-limit",
+        type=int,
+        metavar="WATTS",
+        help=(
+            "Set the runtime total-board input power limit in watts on supported "
+            "Blackhole firmware (minimum: 50 W; maximum is board-specific; "
+            "use 0 to restore the firmware default)"
+        ),
+    )
+    parser.add_argument(
+        "-al",
+        "--aiclk-limit",
+        type=int,
+        metavar="MHZ",
+        help=(
+            "Set a proactive Blackhole AICLK ceiling in MHz before applying "
+            "--power-limit; use 0 to restore the firmware default"
+        ),
+    )
+    parser.add_argument(
+        "-i",
+        "--device",
+        metavar="TARGETS",
+        nargs="+",
+        help=(
+            "Devices for --power-limit/--aiclk-limit: UMD logical IDs, PCI BDFs, or "
+            "/dev/tenstorrent/<id>. Accepts spaces or commas. Default: all devices."
+        ),
+    )
     args = parser.parse_args()
+    if (
+        args.device is not None
+        and args.power_limit is None
+        and args.aiclk_limit is None
+    ):
+        parser.error("--device requires --power-limit or --aiclk-limit")
+    if (
+        args.power_limit not in (None, 0)
+        and args.power_limit < constants.MIN_RUNTIME_BOARD_POWER_LIMIT_WATTS
+    ):
+        parser.error(
+            "--power-limit must be at least "
+            f"{constants.MIN_RUNTIME_BOARD_POWER_LIMIT_WATTS} watts; the maximum "
+            "is board-specific and enforced by firmware"
+        )
+    if args.power_limit is not None and any(
+        (
+            args.reset is not None,
+            args.glx_reset,
+            args.glx_reset_auto,
+            args.glx_list_tray_to_device,
+            args.snapshot,
+            args.filename is not False,
+            args.list,
+        )
+    ):
+        parser.error("--power-limit cannot be combined with another command")
+    if args.aiclk_limit is not None and args.aiclk_limit < 0:
+        parser.error("--aiclk-limit must be zero (restore) or a positive MHz value")
+    if args.aiclk_limit is not None and any(
+        (
+            args.reset is not None,
+            args.glx_reset,
+            args.glx_reset_auto,
+            args.glx_list_tray_to_device,
+            args.snapshot,
+            args.filename is not False,
+            args.list,
+        )
+    ):
+        parser.error("--aiclk-limit cannot be combined with another command")
     return args
 
 
@@ -164,6 +236,45 @@ def tt_smi_main(backend: TTSMIBackend, args):
     Returns:
         None: None
     """
+    if args.power_limit is not None or args.aiclk_limit is not None:
+        device_input = parse_smi_device_input(args.device)
+        try:
+            changed_devices = None
+            if args.aiclk_limit is not None:
+                changed_devices = backend.set_aiclk_limit(
+                    device_input, args.aiclk_limit
+                )
+            if args.power_limit is not None:
+                changed_devices = backend.set_power_limit(
+                    device_input, args.power_limit
+                )
+        except Exception as error:
+            print(
+                CMD_LINE_COLOR.RED,
+                f"Error setting runtime limit: {error}",
+                CMD_LINE_COLOR.ENDC,
+            )
+            sys.exit(1)
+        settings = []
+        if args.aiclk_limit is not None:
+            settings.append(
+                "default AICLK limit"
+                if args.aiclk_limit == 0
+                else f"AICLK limit {args.aiclk_limit} MHz"
+            )
+        if args.power_limit is not None:
+            settings.append(
+                "default board power limit"
+                if args.power_limit == 0
+                else f"board power limit {args.power_limit} W"
+            )
+        print(
+            CMD_LINE_COLOR.GREEN,
+            f"Applied {', '.join(settings)} on device(s): "
+            f"{', '.join(map(str, changed_devices))}",
+            CMD_LINE_COLOR.ENDC,
+        )
+        sys.exit(0)
     if args.list:
         if backend.use_umd:
             backend.print_all_available_devices_umd()
@@ -203,6 +314,7 @@ def tt_smi_main(backend: TTSMIBackend, args):
         offline=args.offline,
     )
     tt_smi_app.run()
+
 
 def main():
     """
@@ -308,7 +420,12 @@ def main():
             CMD_LINE_COLOR.ENDC,
         )
         sys.exit(1)
-    backend = TTSMIBackend(devices=devices, umd_cluster_descriptor=cluster_descriptor, pretty_output=is_tty)
+    backend = TTSMIBackend(
+        devices=devices,
+        umd_cluster_descriptor=cluster_descriptor,
+        fully_init=args.power_limit is None and args.aiclk_limit is None,
+        pretty_output=is_tty,
+    )
 
     tt_smi_main(backend, args)
 
