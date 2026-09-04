@@ -162,18 +162,32 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "-al",
+        "--aiclk-limit",
+        type=int,
+        metavar="MHZ",
+        help=(
+            "Set a proactive Blackhole AICLK ceiling in MHz after applying "
+            "--power-limit; use 0 to restore the firmware default"
+        ),
+    )
+    parser.add_argument(
         "-i",
         "--device",
         metavar="TARGETS",
         nargs="+",
         help=(
-            "Devices for --power-limit: UMD logical IDs, PCI BDFs, or "
+            "Devices for --power-limit/--aiclk-limit: UMD logical IDs, PCI BDFs, or "
             "/dev/tenstorrent/<id>. Accepts spaces or commas. Default: all devices."
         ),
     )
     args = parser.parse_args()
-    if args.device is not None and args.power_limit is None:
-        parser.error("--device requires --power-limit")
+    if (
+        args.device is not None
+        and args.power_limit is None
+        and args.aiclk_limit is None
+    ):
+        parser.error("--device requires --power-limit or --aiclk-limit")
     if (
         args.power_limit is not None
         and args.power_limit < constants.MIN_RUNTIME_BOARD_POWER_LIMIT_WATTS
@@ -195,6 +209,20 @@ def parse_args():
         )
     ):
         parser.error("--power-limit cannot be combined with another command")
+    if args.aiclk_limit is not None and args.aiclk_limit < 0:
+        parser.error("--aiclk-limit must be zero (restore) or a positive MHz value")
+    if args.aiclk_limit is not None and any(
+        (
+            args.reset is not None,
+            args.glx_reset,
+            args.glx_reset_auto,
+            args.glx_list_tray_to_device,
+            args.snapshot,
+            args.filename is not False,
+            args.list,
+        )
+    ):
+        parser.error("--aiclk-limit cannot be combined with another command")
     return args
 
 
@@ -207,16 +235,40 @@ def tt_smi_main(backend: TTSMIBackend, args):
     Returns:
         None: None
     """
-    if args.power_limit is not None:
+    if args.power_limit is not None or args.aiclk_limit is not None:
         device_input = parse_smi_device_input(args.device)
         try:
-            changed_devices = backend.set_power_limit(device_input, args.power_limit)
+            changed_devices = None
+            # Commit and verify electrical policy before allowing any wider
+            # clock ceiling. If the later clock request fails, the board cap
+            # remains in place.
+            if args.power_limit is not None:
+                changed_devices = backend.set_power_limit(
+                    device_input, args.power_limit
+                )
+            if args.aiclk_limit is not None:
+                changed_devices = backend.set_aiclk_limit(
+                    device_input, args.aiclk_limit
+                )
         except Exception as error:
-            print(CMD_LINE_COLOR.RED, f"Error setting power limit: {error}", CMD_LINE_COLOR.ENDC)
+            print(
+                CMD_LINE_COLOR.RED,
+                f"Error setting runtime limit: {error}",
+                CMD_LINE_COLOR.ENDC,
+            )
             sys.exit(1)
+        settings = []
+        if args.aiclk_limit is not None:
+            settings.append(
+                "AICLK limit restored"
+                if args.aiclk_limit == 0
+                else f"AICLK limit {args.aiclk_limit} MHz"
+            )
+        if args.power_limit is not None:
+            settings.append(f"board power limit {args.power_limit} W")
         print(
             CMD_LINE_COLOR.GREEN,
-            f"Set power limit to {args.power_limit} W on device(s): "
+            f"Applied {', '.join(settings)} on device(s): "
             f"{', '.join(map(str, changed_devices))}",
             CMD_LINE_COLOR.ENDC,
         )
@@ -233,7 +285,7 @@ def tt_smi_main(backend: TTSMIBackend, args):
             print(
                 CMD_LINE_COLOR.RED,
                 "This is in a VM, so we cannot list the tray and device mapping.",
-                CMD_LINE_COLOR.ENDC
+                CMD_LINE_COLOR.ENDC,
             )
             sys.exit(1)
         backend.print_tray_and_device_mapping()
@@ -250,7 +302,9 @@ def tt_smi_main(backend: TTSMIBackend, args):
         )
         sys.exit(0)
     if not sys.stdin.isatty():
-        print(f"{CMD_LINE_COLOR.RED}No TTY detected! Interactive shell required.\nUse tt-smi -s for snapshot output.{CMD_LINE_COLOR.ENDC}")
+        print(
+            f"{CMD_LINE_COLOR.RED}No TTY detected! Interactive shell required.\nUse tt-smi -s for snapshot output.{CMD_LINE_COLOR.ENDC}"
+        )
         sys.exit(1)
     tt_smi_app = TTSMI(
         backend=backend,
@@ -260,6 +314,7 @@ def tt_smi_main(backend: TTSMIBackend, args):
         offline=args.offline,
     )
     tt_smi_app.run()
+
 
 def main():
     """
@@ -289,14 +344,24 @@ def main():
     # Handle reset first, without setting up backend
     if args.reset is not None:
         reset_input = parse_smi_device_input(args.reset)
-        pci_board_reset(reset_input, reinit=not(args.no_reinit), print_status=is_tty, use_umd=not args.use_luwen, eth_train_skip=args.eth_train_skip)
+        pci_board_reset(
+            reset_input,
+            reinit=not (args.no_reinit),
+            print_status=is_tty,
+            use_umd=not args.use_luwen,
+            eth_train_skip=args.eth_train_skip,
+        )
         sys.exit(0)
     # Handle ubb reset without backend
     if args.glx_reset:
         # Galaxy reset, without auto retries
         try:
             # reinit has to be enabled to detect devices post reset
-            glx_6u_trays_reset(reinit=not(args.no_reinit), print_status=is_tty, use_umd=not args.use_luwen)
+            glx_6u_trays_reset(
+                reinit=not (args.no_reinit),
+                print_status=is_tty,
+                use_umd=not args.use_luwen,
+            )
         except Exception as e:
             print(
                 CMD_LINE_COLOR.RED,
@@ -322,7 +387,9 @@ def main():
             try:
                 # Try to reset galaxy 6u trays
                 # reinit has to be enabled to detect devices post reset
-                glx_6u_trays_reset(reinit=True, print_status=is_tty, use_umd=not args.use_luwen)
+                glx_6u_trays_reset(
+                    reinit=True, print_status=is_tty, use_umd=not args.use_luwen
+                )
                 break  # If reset was successful, break the loop
             except Exception as e:
                 reset_try_number += 1
@@ -345,12 +412,20 @@ def main():
 
     try:
         if not args.use_luwen:
-            cluster_descriptor, devices = TopologyDiscovery.discover(options=constants.get_default_discovery_options())
+            cluster_descriptor, devices = TopologyDiscovery.discover(
+                options=constants.get_default_discovery_options()
+            )
         else:
             cluster_descriptor = None
-            devices = dict(enumerate(detect_chips_with_callback(
-                local_only=args.local, ignore_ethernet=args.local, print_status=is_tty
-            )))
+            devices = dict(
+                enumerate(
+                    detect_chips_with_callback(
+                        local_only=args.local,
+                        ignore_ethernet=args.local,
+                        print_status=is_tty,
+                    )
+                )
+            )
     except Exception as e:
         print(
             CMD_LINE_COLOR.RED,
@@ -368,7 +443,7 @@ def main():
     backend = TTSMIBackend(
         devices=devices,
         umd_cluster_descriptor=cluster_descriptor,
-        fully_init=args.power_limit is None,
+        fully_init=args.power_limit is None and args.aiclk_limit is None,
         pretty_output=is_tty,
     )
 

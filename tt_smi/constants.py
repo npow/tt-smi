@@ -8,8 +8,26 @@ from tt_umd import (
     TopologyDiscoveryOptions,
 )
 
+TT_SMC_MSG_SET_ASIC_HOST_FMAX = 0x23
 TT_SMC_MSG_SET_BOARD_POWER_LIMIT = 0x24
 MIN_RUNTIME_BOARD_POWER_LIMIT_WATTS = 50
+BH_TELEMETRY_DATA_REG_ADDR = 0x80030430
+TAG_BOARD_POWER_LIMIT = 53
+TAG_HOST_AICLK_LIMIT = 70
+TAG_RUNTIME_POWER_STATUS = 80
+RUNTIME_POWER_STATUS_ABI_MASK = 0xFFFF0000
+RUNTIME_POWER_STATUS_ABI_VALUE = 0x52500000
+RUNTIME_POWER_STATUS_RESERVED_MASK = 1 << 0
+RUNTIME_POWER_POLICY_STRICT = 1 << 1
+RUNTIME_POWER_SAMPLE_FRESH = 1 << 2
+RUNTIME_POWER_POLICY_READY = 1 << 3
+RUNTIME_POWER_REQUIRED = (
+    RUNTIME_POWER_POLICY_STRICT
+    | RUNTIME_POWER_SAMPLE_FRESH
+    | RUNTIME_POWER_POLICY_READY
+)
+RUNTIME_POWER_OPERATIONAL = RUNTIME_POWER_STATUS_ABI_VALUE | RUNTIME_POWER_REQUIRED
+
 
 def get_default_discovery_options():
     options = TopologyDiscoveryOptions()
@@ -18,6 +36,7 @@ def get_default_discovery_options():
     options.cmfw_mismatch_action = TopologyDiscoveryOptions.Action.IGNORE
     options.unexpected_routing_firmware_config = TopologyDiscoveryOptions.Action.IGNORE
     return options
+
 
 SMBUS_TELEMETRY_LIST = [
     "BOARD_ID",
@@ -141,7 +160,7 @@ LIMITS = [
 # FW TAG_INPUT_POWER; missing from UMD TelemetryTag as of tt-umd 0.9.8
 TAG_INPUT_POWER = 54
 
-# leaving this intact for the snapshot version of the firmware list 
+# leaving this intact for the snapshot version of the firmware list
 # Don't want to break any automations we have around the snapshot
 FW_LIST_SNAPSHOT = [
     "fw_bundle_version",

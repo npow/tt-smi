@@ -53,6 +53,7 @@ from tt_tools_common.utils_common.system_utils import (
 )
 from tt_tools_common.utils_common.tools_utils import init_logging
 
+
 class TTSMIBackend:
     """
     TT-SMI backend class that encompasses all chip objects on host.
@@ -68,7 +69,7 @@ class TTSMIBackend:
     ):
         self.devices = devices
         self.use_umd = umd_cluster_descriptor is not None
-        if (self.use_umd):
+        if self.use_umd:
             self.umd_cluster_descriptor = umd_cluster_descriptor
         self.pretty_output = pretty_output
         self.log: log.TTSMILog = log.TTSMILog(
@@ -111,31 +112,42 @@ class TTSMIBackend:
                 self.device_telemetrys.append(self.get_chip_telemetry(i))
                 self.device_gddr_telemetrys.append(self.get_gddr_telemetry(i))
                 self.chip_limits.append(self.get_chip_limits(i))
-    
+
     def is_blackhole(self, device_idx) -> bool:
-        return (self.devices[device_idx].as_bh() if not self.use_umd
-                else self.devices[device_idx].get_arch() == ARCH.BLACKHOLE)
-    
+        return (
+            self.devices[device_idx].as_bh()
+            if not self.use_umd
+            else self.devices[device_idx].get_arch() == ARCH.BLACKHOLE
+        )
+
     def is_wormhole(self, device_idx) -> bool:
-        return (self.devices[device_idx].as_wh() if not self.use_umd
-                else self.devices[device_idx].get_arch() == ARCH.WORMHOLE_B0)
+        return (
+            self.devices[device_idx].as_wh()
+            if not self.use_umd
+            else self.devices[device_idx].get_arch() == ARCH.WORMHOLE_B0
+        )
 
     def is_grayskull(self, device_idx) -> bool:
-        return (self.devices[device_idx].as_gs() if not self.use_umd
-                else False)
-    
+        return self.devices[device_idx].as_gs() if not self.use_umd else False
+
     def get_pci_device_id(self, device_idx) -> str:
         if self.devices[device_idx].is_remote():
             return "N/A"
-        return (self.devices[device_idx].get_pci_interface_id() if not self.use_umd
-                else self.devices[device_idx].get_pci_device().get_device_num())
-        
+        return (
+            self.devices[device_idx].get_pci_interface_id()
+            if not self.use_umd
+            else self.devices[device_idx].get_pci_device().get_device_num()
+        )
+
     def get_pci_bdf(self, device_idx) -> str:
         if self.devices[device_idx].is_remote():
             return "N/A"
-        return (self.devices[device_idx].get_pci_bdf() if not self.use_umd
-                else self.devices[device_idx].get_pci_device().get_device_info().pci_bdf)
-    
+        return (
+            self.devices[device_idx].get_pci_bdf()
+            if not self.use_umd
+            else self.devices[device_idx].get_pci_device().get_device_info().pci_bdf
+        )
+
     def get_device_name(self, device_idx):
         """Get device name from chip object"""
         if self.is_wormhole(device_idx):
@@ -163,9 +175,7 @@ class TTSMIBackend:
                 for device_idx in self.devices
                 if self.get_pci_bdf(device_idx) != "N/A"
             }
-            resolved = [
-                devices_by_bdf.get(bdf.lower()) for bdf in device_input.value
-            ]
+            resolved = [devices_by_bdf.get(bdf.lower()) for bdf in device_input.value]
         elif device_input.type == SmiDeviceTargetKind.DEV_TENSTORRENT_ID:
             devices_by_dev_id = {
                 int(pci_dev_id): device_idx
@@ -182,7 +192,9 @@ class TTSMIBackend:
             if device_idx is None or device_idx not in self.devices
         ]
         if missing:
-            raise ValueError(f"Device target(s) not found: {', '.join(map(str, missing))}")
+            raise ValueError(
+                f"Device target(s) not found: {', '.join(map(str, missing))}"
+            )
         return resolved
 
     def get_runtime_board_power_limit(self, device_idx: int) -> int:
@@ -197,8 +209,165 @@ class TTSMIBackend:
                 )
             return reader.read_entry(tag)
 
-        telemetry = device.as_bh().get_telemetry()
-        return telemetry.board_power_limit
+        return self._read_luwen_blackhole_telemetry_tag(
+            device_idx, constants.TAG_BOARD_POWER_LIMIT
+        )
+
+    def get_runtime_power_status(self, device_idx: int) -> int:
+        """Read and validate Blackhole's runtime electrical-policy status."""
+        device = self.devices[device_idx]
+        if self.use_umd:
+            reader = device.get_arc_telemetry_reader()
+            tag = constants.TAG_RUNTIME_POWER_STATUS
+            if not reader.is_entry_available(tag):
+                raise RuntimeError(
+                    f"Runtime power policy telemetry is unavailable on device {device_idx}"
+                )
+            return reader.read_entry(tag)
+
+        return self._read_luwen_blackhole_telemetry_tag(
+            device_idx, constants.TAG_RUNTIME_POWER_STATUS
+        )
+
+    def require_runtime_power_policy(self, device_idx: int) -> int:
+        """Require the signed runtime-power ABI and an operational policy."""
+        status = self.get_runtime_power_status(device_idx)
+        if (
+            status & constants.RUNTIME_POWER_STATUS_ABI_MASK
+        ) != constants.RUNTIME_POWER_STATUS_ABI_VALUE:
+            raise RuntimeError(
+                f"Runtime board-power status ABI is unavailable or incompatible on "
+                f"device {device_idx} (status {status:#010x}); install supported firmware "
+                f"before raising power"
+            )
+        if status & constants.RUNTIME_POWER_STATUS_RESERVED_MASK:
+            raise RuntimeError(
+                f"Runtime board-power status is malformed on device {device_idx} "
+                f"(status {status:#010x})"
+            )
+
+        missing = constants.RUNTIME_POWER_REQUIRED & ~status
+        if missing:
+            raise RuntimeError(
+                f"Runtime board-power policy is not strict, fresh, and ready on "
+                f"device {device_idx} (status {status:#010x}, missing bits "
+                f"{missing:#x}); install supported firmware before raising power"
+            )
+        return status
+
+    def _read_luwen_blackhole_telemetry_tag(self, device_idx: int, tag: int) -> int:
+        """Read a raw Blackhole tag even when Pyluwen's schema is older."""
+        blackhole = self.devices[device_idx].as_bh()
+        if blackhole is None:
+            raise RuntimeError(
+                f"Blackhole telemetry was requested on unsupported device {device_idx}"
+            )
+        table_address = blackhole.axi_read32(constants.BH_TELEMETRY_DATA_REG_ADDR)
+        if (
+            not isinstance(table_address, int)
+            or table_address in (0, 0xFFFFFFFF)
+            or table_address % 4
+        ):
+            raise RuntimeError(
+                f"Firmware telemetry is unavailable on device {device_idx}"
+            )
+        value = blackhole.axi_read32(table_address + tag * 4)
+        if not isinstance(value, int):
+            raise RuntimeError(
+                f"Firmware telemetry tag {tag} is unavailable on device {device_idx}"
+            )
+        return value
+
+    def get_runtime_aiclk_limit(self, device_idx: int) -> int:
+        """Read the host-requested Blackhole AICLK ceiling in MHz."""
+        device = self.devices[device_idx]
+        if self.use_umd:
+            reader = device.get_arc_telemetry_reader()
+            tag = constants.TAG_HOST_AICLK_LIMIT
+            if not reader.is_entry_available(tag):
+                raise RuntimeError(
+                    f"Host AICLK limit telemetry is unavailable on device {device_idx}"
+                )
+            return reader.read_entry(tag)
+
+        return self._read_luwen_blackhole_telemetry_tag(
+            device_idx, constants.TAG_HOST_AICLK_LIMIT
+        )
+
+    def set_aiclk_limit(self, device_input: SmiDeviceInput, mhz: int) -> List[int]:
+        """Set or restore the proactive Blackhole AICLK ceiling.
+
+        A value of zero restores the firmware default. Non-zero bounds are
+        board-specific and validated by firmware.
+        """
+        if mhz < 0:
+            raise ValueError(
+                "AICLK limit must be zero (restore) or a positive MHz value"
+            )
+
+        device_indices = self.resolve_device_input(device_input)
+        unsupported = [
+            device_idx
+            for device_idx in device_indices
+            if not self.is_blackhole(device_idx)
+        ]
+        if unsupported:
+            raise ValueError(
+                "Runtime AICLK limits require supported Blackhole firmware; "
+                f"unsupported device(s): {', '.join(map(str, unsupported))}"
+            )
+
+        # Probe every target's authoritative readback and electrical-policy
+        # status before changing the first one. A numeric 300 W tag from older
+        # firmware is not sufficient: that default was intentionally non-strict.
+        for device_idx in device_indices:
+            self.get_runtime_aiclk_limit(device_idx)
+            self.require_runtime_power_policy(device_idx)
+
+        restore_default = int(mhz == 0)
+        for device_idx in device_indices:
+            device = self.devices[device_idx]
+            if self.use_umd:
+                exit_code, _, _ = device.arc_msg(
+                    constants.TT_SMC_MSG_SET_ASIC_HOST_FMAX,
+                    args=[mhz, restore_default],
+                )
+            else:
+                result = device.as_bh().arc_msg_buf(
+                    [
+                        constants.TT_SMC_MSG_SET_ASIC_HOST_FMAX,
+                        mhz,
+                        restore_default,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                    ]
+                )
+                if result is None:
+                    raise RuntimeError(
+                        f"Firmware did not acknowledge the AICLK limit on device {device_idx}"
+                    )
+                exit_code = result[0]
+
+            if exit_code != 0:
+                raise RuntimeError(
+                    f"Firmware rejected the {mhz} MHz AICLK limit on device {device_idx}"
+                )
+
+            applied_mhz = self.get_runtime_aiclk_limit(device_idx)
+            if applied_mhz != mhz:
+                time.sleep(0.05)
+                applied_mhz = self.get_runtime_aiclk_limit(device_idx)
+            if applied_mhz != mhz:
+                raise RuntimeError(
+                    f"Firmware did not apply the {mhz} MHz AICLK limit on device "
+                    f"{device_idx}; the current limit remains {applied_mhz} MHz"
+                )
+            self.require_runtime_power_policy(device_idx)
+
+        return device_indices
 
     def set_power_limit(self, device_input: SmiDeviceInput, watts: int) -> List[int]:
         """Set the runtime total-board input power limit on selected devices.
@@ -226,7 +395,13 @@ class TTSMIBackend:
                 f"unsupported device(s): {', '.join(map(str, unsupported))}"
             )
 
-        # Validate every target before issuing the first state-changing command.
+        # Validate every target and both readback paths before issuing the first
+        # state-changing command. The policy itself is checked after the request
+        # because installing a lower limit is a safe remediation operation.
+        for device_idx in device_indices:
+            self.get_runtime_board_power_limit(device_idx)
+            self.get_runtime_power_status(device_idx)
+
         for device_idx in device_indices:
             device = self.devices[device_idx]
             if self.use_umd:
@@ -271,6 +446,7 @@ class TTSMIBackend:
                     f"{device_idx}; the current limit remains {applied_watts} W "
                     "(the request may exceed this board's configured maximum)"
                 )
+            self.require_runtime_power_policy(device_idx)
 
         return device_indices
 
@@ -379,7 +555,9 @@ class TTSMIBackend:
     def print_all_available_devices_umd(self):
         """Print all available boards on host (UMD path). Shows UMD Chip ID, PCI BDF, and PCI Dev ID."""
         if not self.use_umd:
-            raise RuntimeError("print_all_available_devices_umd requires UMD backend (umd_cluster_descriptor set)")
+            raise RuntimeError(
+                "print_all_available_devices_umd requires UMD backend (umd_cluster_descriptor set)"
+            )
         console = get_console()
         table_1 = Table(title="All available boards on host (UMD):")
         table_1.add_column("UMD Chip ID")
@@ -483,9 +661,13 @@ class TTSMIBackend:
                 tag_collection = TelemetryTag
             else:
                 raise ValueError(f"Unknown arch for device {board_num}")
-            
+
             for telem_key in tag_collection:
-                telem_value = hex(telem_reader.read_entry(telem_key.value)) if telem_reader.is_entry_available(telem_key.value) else None
+                telem_value = (
+                    hex(telem_reader.read_entry(telem_key.value))
+                    if telem_reader.is_entry_available(telem_key.value)
+                    else None
+                )
                 smbus_telem_dict[telem_key.name] = telem_value
             # UMD TelemetryTag omits TAG_INPUT_POWER (54); read it by tag id.
             if telem_reader.is_entry_available(constants.TAG_INPUT_POWER):
@@ -495,7 +677,7 @@ class TTSMIBackend:
             else:
                 smbus_telem_dict["INPUT_POWER"] = None
             return smbus_telem_dict
-        
+
         pyluwen_chip = self.devices[board_num]
         if pyluwen_chip.as_bh():
             telem_struct = pyluwen_chip.as_bh().get_telemetry()
@@ -607,12 +789,19 @@ class TTSMIBackend:
 
     def get_board_id(self, board_num) -> str:
         """Read board id from CSM or SPI if FW is not loaded"""
-        if "BOARD_ID" in self.smbus_telem_info[board_num] and self.smbus_telem_info[board_num]["BOARD_ID"]:
+        if (
+            "BOARD_ID" in self.smbus_telem_info[board_num]
+            and self.smbus_telem_info[board_num]["BOARD_ID"]
+        ):
             board_id = int(self.smbus_telem_info[board_num]["BOARD_ID"], base=16)
             return f"{board_id:016x}"
         else:
-            board_info_0 = int(self.smbus_telem_info[board_num]["BOARD_ID_LOW"], base=16)
-            board_info_1 = int(self.smbus_telem_info[board_num]["BOARD_ID_HIGH"], base=16)
+            board_info_0 = int(
+                self.smbus_telem_info[board_num]["BOARD_ID_LOW"], base=16
+            )
+            board_info_1 = int(
+                self.smbus_telem_info[board_num]["BOARD_ID_HIGH"], base=16
+            )
 
             if board_info_0 is None or board_info_1 is None:
                 return "N/A"
@@ -704,13 +893,17 @@ class TTSMIBackend:
             if self.smbus_telem_info[board_num]["DDR_STATUS"] is None:
                 return False
             dram_status = (
-                int(self.smbus_telem_info[board_num]["DDR_STATUS"], 16)) & 0xFFFFFF
+                int(self.smbus_telem_info[board_num]["DDR_STATUS"], 16)
+            ) & 0xFFFFFF
             if dram_status == 0x222222:
                 return True
             return False
         elif self.is_blackhole(board_num):
             dram_status = int(self.smbus_telem_info[board_num]["DDR_STATUS"], 16)
-            if int(get_fw_bundle_version(self.smbus_telem_info[board_num]), 16) >= 0x13070000:
+            if (
+                int(get_fw_bundle_version(self.smbus_telem_info[board_num]), 16)
+                >= 0x13070000
+            ):
                 # After FW version 19.7.0.3 (hex 0x13070003), the dram status is a 16-bit field with the following layout:
                 # DDR Status:
                 # [0]  - Training complete GDDR 0
@@ -763,17 +956,24 @@ class TTSMIBackend:
             elif field == "coords":
                 if self.is_wormhole(board_num):
                     if self.use_umd:
-                        if board_num in self.umd_cluster_descriptor.get_chip_locations():
-                            eth_coord = self.umd_cluster_descriptor.get_chip_locations()[board_num]
-                            dev_info[
-                                field
-                            ] = f"({eth_coord.x}, {eth_coord.y}, {eth_coord.rack}, {eth_coord.shelf})"
+                        if (
+                            board_num
+                            in self.umd_cluster_descriptor.get_chip_locations()
+                        ):
+                            eth_coord = (
+                                self.umd_cluster_descriptor.get_chip_locations()[
+                                    board_num
+                                ]
+                            )
+                            dev_info[field] = (
+                                f"({eth_coord.x}, {eth_coord.y}, {eth_coord.rack}, {eth_coord.shelf})"
+                            )
                         else:
                             dev_info[field] = "(0, 0, 0, 0)"
                     else:
-                        dev_info[
-                            field
-                        ] = f"({self.devices[board_num].as_wh().get_local_coord().shelf_x}, {self.devices[board_num].as_wh().get_local_coord().shelf_y}, {self.devices[board_num].as_wh().get_local_coord().rack_x}, {self.devices[board_num].as_wh().get_local_coord().rack_y})"
+                        dev_info[field] = (
+                            f"({self.devices[board_num].as_wh().get_local_coord().shelf_x}, {self.devices[board_num].as_wh().get_local_coord().shelf_y}, {self.devices[board_num].as_wh().get_local_coord().rack_x}, {self.devices[board_num].as_wh().get_local_coord().rack_y})"
+                        )
                 else:
                     dev_info[field] = "N/A"
             elif field == "dram_status":
@@ -821,7 +1021,9 @@ class TTSMIBackend:
             if self.smbus_telem_info[board_num]["AICLK"] is not None
             else 0
         )
-        timer_heartbeat = int(self.smbus_telem_info[board_num]["TIMER_HEARTBEAT"], 16) // 6 # Watchdog heartbeat, ~2 per second
+        timer_heartbeat = (
+            int(self.smbus_telem_info[board_num]["TIMER_HEARTBEAT"], 16) // 6
+        )  # Watchdog heartbeat, ~2 per second
         fan_speed = (
             int(self.smbus_telem_info[board_num]["FAN_RPM"], 16) & 0xFFFF
             if self.smbus_telem_info[board_num]["FAN_RPM"] is not None
@@ -856,12 +1058,18 @@ class TTSMIBackend:
             int(self.smbus_telem_info[board_num]["ASIC_TEMPERATURE"], 16) & 0xFFFF
         ) / 16
         aiclk = int(self.smbus_telem_info[board_num]["AICLK"], 16) & 0xFFFF
-        arc3_heartbeat = int(self.smbus_telem_info[board_num]["ARC3_HEALTH"], 16) // 5 # Watchdog heartbeat, ~2 per second
+        arc3_heartbeat = (
+            int(self.smbus_telem_info[board_num]["ARC3_HEALTH"], 16) // 5
+        )  # Watchdog heartbeat, ~2 per second
         if self.smbus_telem_info[board_num]["FAN_SPEED"] is not None:
             if self.devices[board_num].is_remote():
-                fan_speed = (int(self.smbus_telem_info[board_num]["FAN_SPEED"], 16) >> 16) & 0xFFFF
+                fan_speed = (
+                    int(self.smbus_telem_info[board_num]["FAN_SPEED"], 16) >> 16
+                ) & 0xFFFF
             else:
-                fan_speed = int(self.smbus_telem_info[board_num]["FAN_SPEED"], 16) & 0xFFFF
+                fan_speed = (
+                    int(self.smbus_telem_info[board_num]["FAN_SPEED"], 16) & 0xFFFF
+                )
         else:
             fan_speed = 0
 
@@ -873,7 +1081,7 @@ class TTSMIBackend:
             "aiclk": f"{aiclk:4.0f}",
             "asic_temperature": f"{asic_temperature:4.1f}",
             "fan_speed": f"{fan_speed}",
-            "heartbeat": f"{arc3_heartbeat}"
+            "heartbeat": f"{arc3_heartbeat}",
         }
 
         return chip_telemetry
@@ -932,10 +1140,14 @@ class TTSMIBackend:
         for field in constants.LIMITS:
             if field == "vdd_min":
                 vdd_limits = self.smbus_telem_info[board_num].get("VDD_LIMITS")
-                chip_limits[field] = f"{(int(vdd_limits, 16) & 0xFFFF) / 1000:4.2f}" if vdd_limits else 0
+                chip_limits[field] = (
+                    f"{(int(vdd_limits, 16) & 0xFFFF) / 1000:4.2f}" if vdd_limits else 0
+                )
             elif field == "vdd_max":
                 vdd_limits = self.smbus_telem_info[board_num].get("VDD_LIMITS")
-                chip_limits[field] = f"{(int(vdd_limits, 16) >> 16) / 1000:4.2f}" if vdd_limits else 0
+                chip_limits[field] = (
+                    f"{(int(vdd_limits, 16) >> 16) / 1000:4.2f}" if vdd_limits else 0
+                )
             elif field == "tdp_limit":
                 tdp = self.smbus_telem_info[board_num].get("TDP")
                 chip_limits[field] = f"{int(tdp, 16) >> 16:3.0f}" if tdp else 0
@@ -947,12 +1159,18 @@ class TTSMIBackend:
                 chip_limits[field] = f"{int(aiclk, 16) >> 16:4.0f}" if aiclk else 0
             elif field == "therm_trip_l1_limit":
                 thm_limits = self.smbus_telem_info[board_num].get("THM_LIMITS")
-                chip_limits[field] = f"{int(thm_limits, 16) >> 16:2.0f}" if thm_limits else 0
+                chip_limits[field] = (
+                    f"{int(thm_limits, 16) >> 16:2.0f}" if thm_limits else 0
+                )
             elif field == "thm_limit":
                 thm_limits = self.smbus_telem_info[board_num].get("THM_LIMITS")
-                chip_limits[field] = f"{int(thm_limits, 16) & 0xFFFF:2.0f}" if thm_limits else 0
+                chip_limits[field] = (
+                    f"{int(thm_limits, 16) & 0xFFFF:2.0f}" if thm_limits else 0
+                )
             elif field == "board_power_limit":
-                board_power_limit = self.smbus_telem_info[board_num].get("BOARD_POWER_LIMIT")
+                board_power_limit = self.smbus_telem_info[board_num].get(
+                    "BOARD_POWER_LIMIT"
+                )
                 chip_limits[field] = (
                     f"{int(board_power_limit, 16):3.0f}" if board_power_limit else 0
                 )
@@ -967,10 +1185,14 @@ class TTSMIBackend:
         for field in constants.LIMITS:
             if field == "vdd_min":
                 vdd_limits = self.smbus_telem_info[board_num].get("VDD_LIMITS")
-                chip_limits[field] = f"{(int(vdd_limits, 16) & 0xFFFF) / 1000:4.2f}" if vdd_limits else 0
+                chip_limits[field] = (
+                    f"{(int(vdd_limits, 16) & 0xFFFF) / 1000:4.2f}" if vdd_limits else 0
+                )
             elif field == "vdd_max":
                 vdd_limits = self.smbus_telem_info[board_num].get("VDD_LIMITS")
-                chip_limits[field] = f"{(int(vdd_limits, 16) >> 16) / 1000:4.2f}" if vdd_limits else 0
+                chip_limits[field] = (
+                    f"{(int(vdd_limits, 16) >> 16) / 1000:4.2f}" if vdd_limits else 0
+                )
             elif field == "tdp_limit":
                 tdp_limit = self.smbus_telem_info[board_num].get("TDP_LIMIT_MAX")
                 chip_limits[field] = f"{int(tdp_limit, 16):3.0f}" if tdp_limit else 0
@@ -981,18 +1203,26 @@ class TTSMIBackend:
                 asic_fmax = self.smbus_telem_info[board_num].get("AICLK_LIMIT_MAX")
                 chip_limits[field] = f"{int(asic_fmax, 16):4.0f}" if asic_fmax else 0
             elif field == "therm_trip_l1_limit":
-                therm_trip_l1_limit = self.smbus_telem_info[board_num].get("THM_LIMIT_THROTTLE")
-                chip_limits[field] = f"{int(therm_trip_l1_limit, 16):2.0f}" if therm_trip_l1_limit else 0
+                therm_trip_l1_limit = self.smbus_telem_info[board_num].get(
+                    "THM_LIMIT_THROTTLE"
+                )
+                chip_limits[field] = (
+                    f"{int(therm_trip_l1_limit, 16):2.0f}" if therm_trip_l1_limit else 0
+                )
             elif field == "thm_limit":
                 if "THM_LIMIT_SHUTDOWN" in self.smbus_telem_info[board_num]:
-                    thm_limits = self.smbus_telem_info[board_num].get("THM_LIMIT_SHUTDOWN")
+                    thm_limits = self.smbus_telem_info[board_num].get(
+                        "THM_LIMIT_SHUTDOWN"
+                    )
                 elif "THM_LIMITS" in self.smbus_telem_info[board_num]:
                     thm_limits = self.smbus_telem_info[board_num].get("THM_LIMITS")
                 else:
                     thm_limits = 0
                 chip_limits[field] = f"{int(thm_limits, 16):2.0f}" if thm_limits else 0
             elif field == "board_power_limit":
-                board_power_limit = self.smbus_telem_info[board_num].get("BOARD_POWER_LIMIT")
+                board_power_limit = self.smbus_telem_info[board_num].get(
+                    "BOARD_POWER_LIMIT"
+                )
                 chip_limits[field] = (
                     f"{int(board_power_limit, 16):3.0f}" if board_power_limit else 0
                 )
